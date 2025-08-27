@@ -1,0 +1,145 @@
+apiVesion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-app
+  labels:
+    app: demo-app
+spec:
+  # Начальное кол-во подов под пиковую нагрузку
+  replicas: 4
+  selector:
+    marchLabels:
+      app: demo-app
+  template:
+    metadata:
+      labels:
+        app: demo-app
+    spec:
+      affinity: # Добавляем affinity для правильного обращения нод друг к другу
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - lablSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - demo-app
+            topologyKey: "kubernetes.io/hostname"
+      containers:
+        - name: demo-app-container
+          image: demo-app-image:latest
+          ports:
+          - containerPort: 80
+          # Менеджмент реквестов и лимитов к поду а так же liveness
+            resources:
+              requests:
+                cpu: "0.1"
+                memory: "128Mi"
+              limits:
+                cpu: "1"
+                memory: "256Mi"
+            readinessProbe:
+              httpGet:
+                path: /healthz
+                port: 80
+              initialDelaySeconds: 10
+              periodSeconds: 5
+            livenessProbe:
+              httpGet:
+                path: /healthz
+                port: 80
+              initialDelaySeconds: 15
+              periodSeconds: 20
+# Доступность к подам app: demo-app
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-app-service
+spec:
+  selector:
+    app: demo-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+  type: LoadBalancer # Обеспечит создание балансировщика нагрузки для нод  
+  
+apiVersion: autoscaling/v2beta2
+kind: HorizontalPodAutoscaler # Добавляем HPA для поддержания кластера при пиковых нагрузка и балансировке
+metadata:
+  name: demo-app-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: demo-app
+  minReplicas: 4
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          avarageUtilization: 50 # HPA на средней загрузке CPU 50% для предотвращения сбоя подов и лишних затрат если значение ниже
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget # Постоянная доступность 2 подов для отказоустойчивости
+metadata:
+  name: demo-app-pdb
+spec:
+  minAvailable: 2
+  slectr:
+    matchLabels:
+      app: demo-app
+
+apiVersion: v1
+kind: ResourceQuota # Предотвращение перегрузки кластера 
+metadata:
+  name: demo-app-quota
+  namespace: default
+spec:
+  hard:
+    pods: "10"
+    requests.cpu: "4"
+    requests.memory: "1Gi"
+    limits.cpu: "10"
+    limits.memory: "2Gi"
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: demo-app-netork-policy
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - host: demo-app.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: demo-app-service
+            port:
+              number: 80
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: demo-app-network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: demo-app
+    policyTypes:
+      - Ingress
+      - Egress
+    ingress:
+      - from:
+          - podSelector: {}
+    egress:
+      - to:
+          - podSelector: {}
+
